@@ -35,6 +35,7 @@ func GetNoOfAppTierEC2() (int, error) {
 				Values: []string{
 					"running",
 					"pending",
+					"shutting-down",
 				},
 			},
 		},
