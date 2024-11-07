@@ -1,0 +1,87 @@
+name: Deploy REST API
+
+on:
+  push:
+    branches:
+    - main
+  workflow_dispatch:
+    inputs:
+      ref-name:
+        description: 'A git ref. commit, branch or tag'
+        required: true
+        default: 'main'
+      tag-prefix:
+        description: 'A prefix to add to the image tag'
+        required: false
+        default: ''
+
+env:
+  GHCR_REGISTRY_USERNAME: ${{ github.actor }}
+  GHCR_REGISTRY_PASSWORD: ${{ secrets.GHCR_TOKEN }}
+  GHCR_REGISTRY: ghcr.io/dhruv-assessment/load-balancer
+  SERVER_USERNAME: ${{ vars.SERVER_USERNAME }}
+  SERVER_IP_ADDR: ${{ vars.SERVER_IP_ADDR }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.get-tag.outputs.IMAGE_TAG }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.ref-name }}
+      - name: Login to docker
+        run: |
+            docker login -u=${{ env.GHCR_REGISTRY_USERNAME }} -p=${{ env.GHCR_REGISTRY_PASSWORD }} ${{ env.GHCR_REGISTRY }}
+      - name: Set image tag env var
+        id: get-tag
+        run: |
+            commit_hash=$(git rev-parse --short HEAD)
+            tag_prefix="${{ inputs.tag-prefix }}"
+            [ -n "${{ inputs.tag-prefix }}" ] && tag_prefix="${{ inputs.tag-prefix }}-"
+            # making env variable available to subsequent steps
+            # https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-an-environment-variable
+            echo "IMAGE_TAG=$tag_prefix$commit_hash" >> "$GITHUB_ENV"
+            echo "IMAGE_TAG=$tag_prefix$commit_hash" >> "$GITHUB_OUTPUT"
+      - name: Build and Push Docker image
+        run: |
+            docker build -t ${{ env.GHCR_REGISTRY }}:$IMAGE_TAG .
+            docker push ${{ env.GHCR_REGISTRY }}:$IMAGE_TAG
+        env:
+            DOCKER_BUILDKIT: 1
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      CONTAINER_NAME: load-balancer
+    steps:
+      - name: Install SSH client
+        run: sudo apt-get install -y ssh
+      - name: Set Docker image
+        run: echo "DOCKER_IMAGE=${{ env.GHCR_REGISTRY }}:${{ needs.build.outputs.image_tag }}" >> $GITHUB_ENV
+      - name: Deploy to Server
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ env.SSH_PRIVATE_KEY}}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh -o StrictHostKeyChecking=no ${{ env.SERVER_USERNAME }}@${{ env.SERVER_IP_ADDR }} << 'EOF'
+            # Pull the latest image
+            docker login -u=${{ env.GHCR_REGISTRY_USERNAME }} -p=${{ env.GHCR_REGISTRY_PASSWORD }} ${{ env.GHCR_REGISTRY }}
+            docker pull ${{ env.DOCKER_IMAGE }}
+
+            docker stop ${{ env.CONTAINER_NAME }} || true
+            docker rm ${{ env.CONTAINER_NAME }} || true
+
+            docker run -d -e AWS_ACCESS_KEY_ID=${{ secrets.AWS_ACCESS_KEY_ID }} \
+              -e AWS_SECRET_ACCESS_KEY=${{ secrets.AWS_SECRET_ACCESS_KEY }}\
+              -e AWS_DEFAULT_REGION=${{ vars.AWS_DEFAULT_REGION }}\
+              -e AWS_AMI_ID=${{ vars.AWS_AMI_ID }} \
+              -e AWS_SECURITY_GROUP_ID=${{ vars.AWS_SECURITY_GROUP_ID }} \
+              -e AWS_REQ_URL=${{ vars.AWS_REQ_URL }} \
+              -e AWS_USER_DATA=${{ vars.AWS_USER_DATA }} \
+              --name ${{ env.CONTAINER_NAME }} ${{ env.DOCKER_IMAGE }}
+
+          EOF
