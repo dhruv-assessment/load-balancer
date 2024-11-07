@@ -40,6 +40,9 @@ func GetNoOfAppTierEC2() (int, error) {
 			},
 		},
 	})
+	if err != nil {
+		return -1, err
+	}
 
 	noOfAppTierInstaces := len(result.Reservations)
 
